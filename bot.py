@@ -313,9 +313,5 @@ def main():
     print("Бот запущен...")
     application.run_polling()
 
-# Точка входа в программу
-def main():
-    # ваш существующий код функции main
-
 if __name__ == '__main__':
     main()
