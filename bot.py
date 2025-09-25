@@ -12,7 +12,8 @@ logging.basicConfig(
 )
 
 # Вставьте сюда ваш токен от BotFather
-BOT_TOKEN = "8029857232:AAEi8YfRTWafF2M8jQnOQae1Xg25bdqw6Ds"
+import os
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8029857232:AAEi8YfRTWafF2M8jQnOQae1Xg25bdqw6Ds')
 
 # Создаем и настраиваем базу данных SQLite
 def init_db():
