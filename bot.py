@@ -1,7 +1,8 @@
 import logging
 import sqlite3
+import re
 from datetime import datetime, timedelta
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Настройка логирования чтобы видеть что происходит
@@ -33,6 +34,7 @@ def init_db():
 
 # Вызываем функцию при старте
 init_db()
+
 def save_workout(user_id, user_name, workout_type, distance):
     conn = sqlite3.connect('workouts.db')
     cursor = conn.cursor()
@@ -45,6 +47,131 @@ def save_workout(user_id, user_name, workout_type, distance):
     
     conn.commit()
     conn.close()
+
+# Создаем клавиатуру с меню
+def get_main_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("🏃 Мой пробег"), KeyboardButton("🏆 Топ недели")],
+        [KeyboardButton("📊 Топ месяца"), KeyboardButton("❓ Помощь")]
+    ], resize_keyboard=True)
+
+# Команда /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🏃 Добро пожаловать в бегового бота!\n\n"
+        "Выберите действие из меню ниже:",
+        reply_markup=get_main_keyboard()
+    )
+
+# Функция для получения статистики пользователя
+def get_user_stats(user_id, days=7):
+    """Получает статистику пользователя за последние days дней"""
+    conn = sqlite3.connect('workouts.db')
+    cursor = conn.cursor()
+    
+    since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Общая статистика
+    cursor.execute('''
+        SELECT 
+            COUNT(*) as workouts_count,
+            SUM(distance) as total_distance,
+            AVG(distance) as avg_distance
+        FROM workouts 
+        WHERE user_id = ? AND date > ?
+    ''', (user_id, since_date))
+    
+    stats = cursor.fetchone()
+    
+    # Статистика по типам тренировок
+    cursor.execute('''
+        SELECT workout_type, SUM(distance) as distance
+        FROM workouts 
+        WHERE user_id = ? AND date > ?
+        GROUP BY workout_type
+    ''', (user_id, since_date))
+    
+    workout_types = cursor.fetchall()
+    conn.close()
+    
+    return stats, workout_types
+
+# Обработчик кнопки «Мой пробег»
+async def my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    user_id = user.id
+    
+    # Получаем статистику за неделю
+    stats, workout_types = get_user_stats(user_id, days=7)
+    
+    if not stats or not stats[0]:  # Если нет тренировок
+        await update.message.reply_text(
+            f"📊 {user.first_name}, у вас пока нет тренировок за последнюю неделю.\n\n"
+            f"Отправьте фото пробежки с дистанцией и хештегом!",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    workouts_count, total_distance, avg_distance = stats
+    
+    # Формируем сообщение со статистикой
+    message = f"🏃 **Ваша статистика за неделю**\n\n"
+    message += f"📈 **Пробежки:** {workouts_count}\n"
+    message += f"📏 **Общая дистанция:** {total_distance:.1f} км\n"
+    message += f"📊 **Средняя дистанция:** {avg_distance:.1f} км\n\n"
+    
+    # Добавляем статистику по типам тренировок
+    if workout_types:
+        message += "**По видам спорта:**\n"
+        for workout_type, distance in workout_types:
+            type_emoji = {
+                'run': '🏃‍♂️',
+                'bike': '🚴‍♂️', 
+                'swim': '🏊‍♂️'
+            }.get(workout_type, '✅')
+            
+            type_name = {
+                'run': 'Бег',
+                'bike': 'Вело',
+                'swim': 'Плавание'
+            }.get(workout_type, 'Тренировка')
+            
+            message += f"{type_emoji} {type_name}: {distance:.1f} км\n"
+    
+    message += f"\n💪 Так держать, {user.first_name}!"
+    
+    await update.message.reply_text(
+        message,
+        reply_markup=get_main_keyboard(),
+        parse_mode='Markdown'
+    )
+
+# Команда помощи
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """
+🤖 **Как пользоваться ботом:**
+
+🏃 **Отслеживание тренировок:**
+- Отправьте фото тренировки
+- В подписи укажите дистанцию и хештег:
+  • Бег: "5 км #япобегал"
+  • Вело: "20 км #япокрутил"
+  • Плавание: "1 км #япоплавал"
+
+📊 **Статистика:**
+- 🏃 Мой пробег - ваша статистика за неделю
+- 🏆 Топ недели - рейтинг участников
+- 📊 Топ месяца - рейтинг за месяц
+
+💡 **Пример сообщения:**
+"10.5 км #япобегал"
+"""
+    await update.message.reply_text(
+        help_text,
+        reply_markup=get_main_keyboard(),
+        parse_mode='Markdown'
+    )
+
 async def handle_photo_with_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user = message.from_user
@@ -71,9 +198,6 @@ async def handle_photo_with_text(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     # Ищем число (целое или дробное), обозначающее дистанцию
-    # Это простой вариант, можно улучшить
-    import re
-    # Шаблон ищет числа, возможно с точкой, и возможные единицы измерения (km, км)
     distance_pattern = r'(\d+[.,]?\d*)\s*(км|km|КМ)'
     matches = re.search(distance_pattern, caption)
 
@@ -87,15 +211,25 @@ async def handle_photo_with_text(update: Update, context: ContextTypes.DEFAULT_T
             user_name = user.first_name or user.username or "Аноним"
             save_workout(user.id, user_name, workout_type, distance_km)
 
-            # Отправляем подтверждение пользователю (можно убрать, если не нужно)
-            await message.reply_text(f"✅ Записано! {distance_km} км ({workout_type})")
+            # Отправляем подтверждение пользователю
+            await message.reply_text(
+                f"✅ Записано! {distance_km} км ({workout_type})",
+                reply_markup=get_main_keyboard()
+            )
             
         except ValueError:
             # Если не получилось преобразовать в число
-            await message.reply_text("❌ Не могу понять дистанцию. Напишите, например, '10 км'.")
+            await message.reply_text(
+                "❌ Не могу понять дистанцию. Напишите, например, '10 км'.",
+                reply_markup=get_main_keyboard()
+            )
     else:
         # Если не нашли шаблон с дистанцией
-        await message.reply_text("❌ Не вижу дистанцию в формате '5 км' или '10.5 km'.")
+        await message.reply_text(
+            "❌ Не вижу дистанцию в формате '5 км' или '10.5 km'.",
+            reply_markup=get_main_keyboard()
+        )
+
 def get_top_workouts(workout_type=None, days=7):
     """Функция для получения топа из базы данных за последние days дней"""
     conn = sqlite3.connect('workouts.db')
@@ -141,25 +275,39 @@ async def top_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_top_message(update, top_list, period_name):
     """Вспомогательная функция для форматирования и отправки топа"""
     if not top_list:
-        await update.message.reply_text(f"🏆 За {period_name} пока нет данных о тренировках.")
+        await update.message.reply_text(
+            f"🏆 За {period_name} пока нет данных о тренировках.",
+            reply_markup=get_main_keyboard()
+        )
         return
 
     message_text = f"🏆 ТОП-10 за {period_name}:\n\n"
     for i, (user_name, total_distance) in enumerate(top_list, 1):
         message_text += f"{i}. {user_name}: {total_distance:.1f} км\n"
 
-    await update.message.reply_text(message_text)
+    await update.message.reply_text(
+        message_text,
+        reply_markup=get_main_keyboard()
+    )
+
 def main():
     # Создаем приложение и передаем ему токен
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Добавляем обработчики
-    # Обработчик для сообщений с фото и подписью
-    application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r".*"), handle_photo_with_text))
-    
-    # Обработчики команд
+    # Добавляем обработчики команд
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("top_week", top_week))
     application.add_handler(CommandHandler("top_month", top_month))
+    application.add_handler(CommandHandler("help", help_command))
+
+    # Добавляем обработчики текстовых сообщений (кнопок)
+    application.add_handler(MessageHandler(filters.Text(["🏃 Мой пробег"]), my_stats))
+    application.add_handler(MessageHandler(filters.Text(["🏆 Топ недели"]), top_week))
+    application.add_handler(MessageHandler(filters.Text(["📊 Топ месяца"]), top_month))
+    application.add_handler(MessageHandler(filters.Text(["❓ Помощь"]), help_command))
+
+    # Обработчик для сообщений с фото и подписью
+    application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r".*"), handle_photo_with_text))
 
     # Запускаем бота на опрос серверов Telegram
     print("Бот запущен...")
