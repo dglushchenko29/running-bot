@@ -3,7 +3,7 @@ import sqlite3
 import re
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
 # Настройка логирования чтобы видеть что происходит
 logging.basicConfig(
@@ -292,27 +292,29 @@ async def send_top_message(update, top_list, period_name):
     )
 
 def main():
-    # Создаем приложение и передаем ему токен
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Создаем updater вместо application
+    updater = Updater(token=BOT_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
 
     # Добавляем обработчики команд
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("top_week", top_week))
-    application.add_handler(CommandHandler("top_month", top_month))
-    application.add_handler(CommandHandler("help", help_command))
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("top_week", top_week))
+    dispatcher.add_handler(CommandHandler("top_month", top_month))
+    dispatcher.add_handler(CommandHandler("help", help_command))
 
     # Добавляем обработчики текстовых сообщений (кнопок)
-    application.add_handler(MessageHandler(filters.Text(["🏃 Мой пробег"]), my_stats))
-    application.add_handler(MessageHandler(filters.Text(["🏆 Топ недели"]), top_week))
-    application.add_handler(MessageHandler(filters.Text(["📊 Топ месяца"]), top_month))
-    application.add_handler(MessageHandler(filters.Text(["❓ Помощь"]), help_command))
+    dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex('^🏃 Мой пробег$'), my_stats))
+    dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex('^🏆 Топ недели$'), top_week))
+    dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex('^📊 Топ месяца$'), top_month))
+    dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex('^❓ Помощь$'), help_command))
 
     # Обработчик для сообщений с фото и подписью
-    application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r".*"), handle_photo_with_text))
+    dispatcher.add_handler(MessageHandler(Filters.photo, handle_photo_with_text))
 
-    # Запускаем бота на опрос серверов Telegram
+    # Запускаем бота
     print("Бот запущен...")
-    application.run_polling()
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == '__main__':
     main()
