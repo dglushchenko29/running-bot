@@ -51,13 +51,24 @@ def get_main_keyboard():
         [KeyboardButton("📊 Топ месяца"), KeyboardButton("❓ Помощь")]
     ], resize_keyboard=True)
 
+# Приватный ответ (только для отправителя)
+def reply_private(update, text, reply_markup=None):
+    try:
+        update.message.reply_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        # Если не удалось ответить в чате, пробуем в личные сообщения
+        try:
+            update.message.from_user.send_message(text, reply_markup=reply_markup)
+        except:
+            pass
+
 # Команды
 def start(update, context):
-    update.message.reply_text(
+    reply_private(update,
         "🏃 Беговой бот активирован!\n\n"
         "Отправьте тренировку в формате: 5 км #япобегал\n"
         "Используйте кнопки для статистики:",
-        reply_markup=get_main_keyboard()
+        get_main_keyboard()
     )
 
 def get_user_stats(user_id, days=7):
@@ -75,11 +86,11 @@ def week_stats(update, context):
     stats = get_user_stats(user.id, 7)
     
     if not stats or not stats[0]:
-        update.message.reply_text("📊 За неделю нет тренировок.")
+        reply_private(update, "📊 За неделю нет тренировок.")
         return
     
     workouts, total, avg = stats
-    update.message.reply_text(f"📅 За неделю: {workouts} пробежек, {total:.1f} км, в среднем {avg:.1f} км")
+    reply_private(update, f"📅 За неделю: {workouts} пробежек, {total:.1f} км, в среднем {avg:.1f} км")
 
 # Команда /stats
 def all_stats(update, context):
@@ -91,14 +102,14 @@ def all_stats(update, context):
     conn.close()
     
     if not workouts:
-        update.message.reply_text("📊 Пока нет записанных тренировок.")
+        reply_private(update, "📊 Пока нет записанных тренировок.")
         return
     
     message = "📋 Последние тренировки:\n"
     for distance, date in workouts:
         message += f"• {distance:.1f} км ({date[:10]})\n"
     
-    update.message.reply_text(message)
+    reply_private(update, message)
 
 # Кнопка "Мой пробег"
 def my_stats(update, context):
@@ -107,7 +118,7 @@ def my_stats(update, context):
     stats_month = get_user_stats(user.id, 30)
     
     if not stats_week or not stats_week[0]:
-        update.message.reply_text("📊 Пока нет тренировок.", reply_markup=get_main_keyboard())
+        reply_private(update, "📊 Пока нет тренировок.", get_main_keyboard())
         return
     
     wk_workouts, wk_total, wk_avg = stats_week
@@ -117,11 +128,11 @@ def my_stats(update, context):
     message += f"📅 Неделя: {wk_workouts} пробежек, {wk_total:.1f} км\n"
     message += f"📅 Месяц: {mn_workouts} пробежек, {mn_total:.1f} км\n"
     
-    update.message.reply_text(message, reply_markup=get_main_keyboard())
+    reply_private(update, message, get_main_keyboard())
 
 def help_command(update, context):
     help_text = "🤖 Отправьте: 5 км #япобегал\nИспользуйте кнопки для статистики!"
-    update.message.reply_text(help_text, reply_markup=get_main_keyboard())
+    reply_private(update, help_text, get_main_keyboard())
 
 # Обработчик сообщений с тренировками
 def handle_workout_message(update, context):
@@ -154,11 +165,12 @@ def handle_workout_message(update, context):
             user_name = user.first_name or user.username or "Аноним"
             save_workout(user.id, user_name, workout_type, distance_km)
             
-            update.message.reply_text(f"✅ Записано! {distance_km} км", reply_markup=get_main_keyboard())
+            # Приватный ответ о записи
+            reply_private(update, f"✅ Записано! {distance_km} км", get_main_keyboard())
         except ValueError:
             pass
 
-# Топы
+# Топы (публичные - видны всем)
 def get_top_workouts(days=7):
     conn = sqlite3.connect('workouts.db')
     cursor = conn.cursor()
@@ -178,13 +190,18 @@ def top_month(update, context):
 
 def send_top_message(update, top_list, period_name):
     if not top_list:
-        update.message.reply_text(f"🏆 За {period_name} пока нет данных.", reply_markup=get_main_keyboard())
+        reply_private(update, f"🏆 За {period_name} пока нет данных.", get_main_keyboard())
         return
         
     message = f"🏆 ТОП за {period_name}:\n"
     for i, (user_name, distance) in enumerate(top_list, 1):
         message += f"{i}. {user_name}: {distance:.1f} км\n"
-    update.message.reply_text(message, reply_markup=get_main_keyboard())
+    
+    # Топы публичные - видны всем в чате
+    try:
+        update.message.reply_text(message)
+    except:
+        reply_private(update, message)
 
 def main():
     updater = Updater(token=BOT_TOKEN, use_context=True)
