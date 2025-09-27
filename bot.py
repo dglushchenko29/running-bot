@@ -60,7 +60,19 @@ def send_private_message(user, text):
     except:
         return False
 
-# Обработчик тренировок - ставит реакцию и пишет в ЛС
+# "Реакция" - маленькое сообщение рядом с исходным
+def add_reaction(update, emoji="🔥"):
+    try:
+        # Отправляем маленькое сообщение как псевдо-реакцию
+        update.message.reply_text(
+            emoji,
+            reply_to_message_id=update.message.message_id,
+            allow_sending_without_reply=True
+        )
+    except:
+        pass
+
+# Обработчик тренировок
 def handle_workout_message(update, context):
     text = update.message.text
     user = update.message.from_user
@@ -95,11 +107,8 @@ def handle_workout_message(update, context):
             user_name = user.first_name or user.username or "Аноним"
             save_workout(user.id, user_name, workout_type, distance_km)
             
-            # Ставим реакцию (всем видно в чате)
-            try:
-                update.message.reply_text(emoji)
-            except:
-                pass
+            # Ставим "реакцию" - маленькое сообщение рядом
+            add_reaction(update, emoji)
             
             # Приватное сообщение в ЛС
             private_msg = f"✅ Записано {distance_km} км!\n\nКоманды:\n/stats - моя статистика\n/top_week - топ недели\n/top_month - топ месяца"
@@ -130,8 +139,7 @@ def stats_command(update, context):
     
     message = f"🏃 Ваша статистика:\n\n"
     message += f"📅 Неделя: {wk_workouts} пробежек, {wk_total:.1f} км\n"
-    message += f"📅 Месяц: {mn_workouts} пробежек, {mn_total:.1f} км\n\n"
-    message += "💡 Отправьте: 5 км #япобегал"
+    message += f"📅 Месяц: {mn_workouts} пробежек, {mn_total:.1f} км"
     
     send_private_message(user, message)
 
