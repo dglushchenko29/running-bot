@@ -3,7 +3,6 @@ import sqlite3
 import re
 import os
 from datetime import datetime, timedelta
-from telegram import ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
 # Настройка логирования
@@ -44,20 +43,6 @@ def save_workout(user_id, user_name, workout_type, distance):
     conn.commit()
     conn.close()
 
-# Меню (появляется только по команде /menu)
-def get_main_keyboard():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("📊 Моя статистика"), KeyboardButton("🏆 Топ недели")],
-        [KeyboardButton("📈 Топ месяца"), KeyboardButton("❓ Помощь")]
-    ], resize_keyboard=True, one_time_keyboard=True)  # one_time_keyboard - скрывается после использования
-
-# Команда /menu - показывает меню
-def show_menu(update, context):
-    update.message.reply_text(
-        "🏃 Выберите действие:",
-        reply_markup=get_main_keyboard()
-    )
-
 def get_user_stats(user_id, days=7):
     conn = sqlite3.connect('workouts.db')
     cursor = conn.cursor()
@@ -67,14 +52,15 @@ def get_user_stats(user_id, days=7):
     conn.close()
     return stats
 
-# Реакция на сообщение с тренировкой
-def add_reaction(update, emoji="🔥"):
+# Отправка приватного сообщения (только в ЛС)
+def send_private_message(user, text):
     try:
-        update.message.reply_text(emoji)  # Простая эмодзи как реакция
+        user.send_message(text)
+        return True
     except:
-        pass
+        return False
 
-# Обработчик сообщений с тренировками
+# Обработчик тренировок - ставит реакцию и пишет в ЛС
 def handle_workout_message(update, context):
     text = update.message.text
     user = update.message.from_user
@@ -97,7 +83,7 @@ def handle_workout_message(update, context):
         workout_type = 'swim'
         emoji = "🏊‍♂️"
     else:
-        return  # Игнорируем если нет хештега
+        return
     
     # Ищем дистанцию
     matches = re.search(r'(\d+[.,]?\d*)\s*(км|km)', text, re.IGNORECASE)
@@ -109,83 +95,141 @@ def handle_workout_message(update, context):
             user_name = user.first_name or user.username or "Аноним"
             save_workout(user.id, user_name, workout_type, distance_km)
             
-            # Ставим реакцию (всем видно)
-            add_reaction(update, emoji)
+            # Ставим реакцию (всем видно в чате)
+            try:
+                update.message.reply_text(emoji)
+            except:
+                pass
             
-            # Приватный ответ (только отправителю)
-            update.message.reply_text(
-                f"✅ Записано {distance_km} км!\n/menu - для статистики",
-                reply_to_message_id=update.message.message_id
-            )
+            # Приватное сообщение в ЛС
+            private_msg = f"✅ Записано {distance_km} км!\n\nКоманды:\n/stats - моя статистика\n/top_week - топ недели\n/top_month - топ месяца"
+            send_private_message(user, private_msg)
+            
         except ValueError:
             pass
 
-# Кнопка "Моя статистика"
-def my_stats(update, context):
+# Команда /stats - полностью приватная
+def stats_command(update, context):
     user = update.message.from_user
+    
+    # Пытаемся удалить команду из чата
+    try:
+        update.message.delete()
+    except:
+        pass
+    
     stats_week = get_user_stats(user.id, 7)
     stats_month = get_user_stats(user.id, 30)
     
     if not stats_week or not stats_week[0]:
-        update.message.reply_text("📊 Пока нет тренировок.", reply_markup=get_main_keyboard())
+        send_private_message(user, "📊 Пока нет тренировок.")
         return
     
     wk_workouts, wk_total, wk_avg = stats_week
     mn_workouts, mn_total, mn_avg = stats_month
     
-    message = f"🏃 Статистика {user.first_name}:\n\n"
+    message = f"🏃 Ваша статистика:\n\n"
     message += f"📅 Неделя: {wk_workouts} пробежек, {wk_total:.1f} км\n"
-    message += f"📅 Месяц: {mn_workouts} пробежек, {mn_total:.1f} км\n"
+    message += f"📅 Месяц: {mn_workouts} пробежек, {mn_total:.1f} км\n\n"
+    message += "💡 Отправьте: 5 км #япобегал"
     
-    update.message.reply_text(message, reply_markup=get_main_keyboard())
+    send_private_message(user, message)
 
-# Топы (публичные)
-def get_top_workouts(days=7):
+# Команда /top_week - публичный топ
+def top_week_command(update, context):
+    user = update.message.from_user
+    
+    # Пытаемся удалить команду из чата
+    try:
+        update.message.delete()
+    except:
+        pass
+    
     conn = sqlite3.connect('workouts.db')
     cursor = conn.cursor()
-    since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    since_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('SELECT user_name, SUM(distance) FROM workouts WHERE date > ? GROUP BY user_id ORDER BY SUM(distance) DESC LIMIT 10', (since_date,))
     top_list = cursor.fetchall()
     conn.close()
-    return top_list
-
-def top_week(update, context):
-    top_list = get_top_workouts(7)
-    send_top_message(update, top_list, "неделю")
-
-def top_month(update, context):
-    top_list = get_top_workouts(30)
-    send_top_message(update, top_list, "месяц")
-
-def send_top_message(update, top_list, period_name):
+    
     if not top_list:
-        update.message.reply_text(f"🏆 За {period_name} пока нет данных.", reply_markup=get_main_keyboard())
+        send_private_message(user, "🏆 За неделю пока нет данных.")
         return
         
-    message = f"🏆 ТОП за {period_name}:\n"
+    message = "🏆 ТОП за неделю:\n"
     for i, (user_name, distance) in enumerate(top_list, 1):
         message += f"{i}. {user_name}: {distance:.1f} км\n"
     
-    update.message.reply_text(message, reply_markup=get_main_keyboard())
+    # Топ отправляем в чат (публично)
+    try:
+        update.message.reply_text(message)
+    except:
+        send_private_message(user, message)
 
-def help_command(update, context):
-    help_text = "🤖 Как использовать:\n\n📝 Отправьте: 5 км #япобегал\n🔥 Бот поставит реакцию\n✅ Ответит вам лично\n\n/menu - открыть меню статистики"
-    update.message.reply_text(help_text, reply_markup=get_main_keyboard())
+# Команда /top_month - публичный топ
+def top_month_command(update, context):
+    user = update.message.from_user
+    
+    # Пытаемся удалить команду из чата
+    try:
+        update.message.delete()
+    except:
+        pass
+    
+    conn = sqlite3.connect('workouts.db')
+    cursor = conn.cursor()
+    since_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('SELECT user_name, SUM(distance) FROM workouts WHERE date > ? GROUP BY user_id ORDER BY SUM(distance) DESC LIMIT 10', (since_date,))
+    top_list = cursor.fetchall()
+    conn.close()
+    
+    if not top_list:
+        send_private_message(user, "🏆 За месяц пока нет данных.")
+        return
+        
+    message = "🏆 ТОП за месяц:\n"
+    for i, (user_name, distance) in enumerate(top_list, 1):
+        message += f"{i}. {user_name}: {distance:.1f} км\n"
+    
+    # Топ отправляем в чат (публично)
+    try:
+        update.message.reply_text(message)
+    except:
+        send_private_message(user, message)
+
+# Команда /start - приватная справка
+def start_command(update, context):
+    user = update.message.from_user
+    
+    # Пытаемся удалить команду из чата
+    try:
+        update.message.delete()
+    except:
+        pass
+    
+    message = "🏃 Беговой бот\n\n"
+    message += "📝 Чтобы записать тренировку, отправьте в чат:\n"
+    message += "5 км #япобегал - для бега\n"
+    message += "20 км #япокрутил - для вело\n"
+    message += "1 км #япоплавал - для плавания\n\n"
+    message += "📊 Команды (приватные):\n"
+    message += "/stats - ваша статистика\n"
+    message += "/top_week - топ недели (публичный)\n"
+    message += "/top_month - топ месяца (публичный)\n\n"
+    message += "🔥 Бот поставит реакцию на ваше сообщение!"
+    
+    send_private_message(user, message)
 
 def main():
     updater = Updater(token=BOT_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
 
-    # Команды
-    dispatcher.add_handler(CommandHandler("menu", show_menu))
-    dispatcher.add_handler(CommandHandler("start", show_menu))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-
-    # Обработчики кнопок
-    dispatcher.add_handler(MessageHandler(Filters.text("📊 Моя статистика"), my_stats))
-    dispatcher.add_handler(MessageHandler(Filters.text("🏆 Топ недели"), top_week))
-    dispatcher.add_handler(MessageHandler(Filters.text("📈 Топ месяца"), top_month))
-    dispatcher.add_handler(MessageHandler(Filters.text("❓ Помощь"), help_command))
+    # Команды (приватные)
+    dispatcher.add_handler(CommandHandler("start", start_command))
+    dispatcher.add_handler(CommandHandler("stats", stats_command))
+    dispatcher.add_handler(CommandHandler("top_week", top_week_command))
+    dispatcher.add_handler(CommandHandler("top_month", top_month_command))
+    dispatcher.add_handler(CommandHandler("help", start_command))
 
     # Обработчик тренировок
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_workout_message))
