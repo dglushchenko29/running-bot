@@ -1,168 +1,214 @@
-import logging
-import sqlite3
-import re
 import os
+import telebot
+from telebot import types
+import sqlite3
 from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+import re
+import logging
 
 # Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Токен бота
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8029857232:AAEi8YfRTWafF2M8jQnOQae1Xg25bdqw6Ds')
+# Инициализация бота
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is not set")
 
-# База данных
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Инициализация базы данных
 def init_db():
-    conn = sqlite3.connect('workouts.db')
+    conn = sqlite3.connect('running.db')
     cursor = conn.cursor()
+    
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS workouts (
+        CREATE TABLE IF NOT EXISTS runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
-            user_name TEXT,
-            workout_type TEXT NOT NULL,
+            username TEXT,
             distance REAL NOT NULL,
-            date TEXT NOT NULL
+            date TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
     conn.commit()
     conn.close()
+    logger.info("Database initialized")
 
-init_db()
-
-def save_workout(user_id, user_name, workout_type, distance):
-    conn = sqlite3.connect('workouts.db')
+# Функция для добавления пробега
+def add_run(user_id, username, distance, date=None):
+    if date is None:
+        date = datetime.now().strftime('%Y-%m-%d')
+    
+    conn = sqlite3.connect('running.db')
     cursor = conn.cursor()
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
     cursor.execute('''
-        INSERT INTO workouts (user_id, user_name, workout_type, distance, date)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, user_name, workout_type, distance, current_time))
+        INSERT INTO runs (user_id, username, distance, date)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, username, distance, date))
+    
     conn.commit()
     conn.close()
+    logger.info(f"Added run: user_id={user_id}, distance={distance}km, date={date}")
 
-# Меню
-def get_main_keyboard():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("🏃 Мой пробег"), KeyboardButton("🏆 Топ недели")],
-        [KeyboardButton("📊 Топ месяца"), KeyboardButton("❓ Помощь")]
-    ], resize_keyboard=True)
-
-# Команды
-def start(update, context):
-    update.message.reply_text("🏃 Добро пожаловать! Выберите действие:", reply_markup=get_main_keyboard())
-
-def get_user_stats(user_id, days=7):
-    conn = sqlite3.connect('workouts.db')
+# Функция для получения пробега за неделю
+def get_weekly_distance(user_id):
+    conn = sqlite3.connect('running.db')
     cursor = conn.cursor()
-    since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute('SELECT COUNT(*), SUM(distance), AVG(distance) FROM workouts WHERE user_id = ? AND date > ?', (user_id, since_date))
-    stats = cursor.fetchone()
+    
+    week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    
+    cursor.execute('''
+        SELECT SUM(distance) FROM runs 
+        WHERE user_id = ? AND date >= ?
+    ''', (user_id, week_ago))
+    
+    result = cursor.fetchone()
     conn.close()
-    return stats
-
-def my_stats(update, context):
-    user = update.message.from_user
-    stats = get_user_stats(user.id)
     
-    if not stats or not stats[0]:
-        update.message.reply_text(f"📊 {user.first_name}, пока нет тренировок за неделю.", reply_markup=get_main_keyboard())
-        return
-    
-    workouts_count, total_distance, avg_distance = stats
-    message = f"🏃 Статистика {user.first_name} за неделю:\n\n"
-    message += f"📈 Пробежки: {workouts_count}\n"
-    message += f"📏 Дистанция: {total_distance:.1f} км\n"
-    message += f"📊 В среднем: {avg_distance:.1f} км\n"
-    message += f"\n💪 Так держать!"
-    
-    update.message.reply_text(message, reply_markup=get_main_keyboard())
+    return result[0] if result[0] is not None else 0
 
-def help_command(update, context):
-    help_text = "🤖 Отправьте фото тренировки с подписью: '5 км #япобегал'"
-    update.message.reply_text(help_text, reply_markup=get_main_keyboard())
-
-def handle_photo_with_text(update, context):
-    message = update.message
-    user = update.message.from_user
-    caption = message.caption
-
-    if not caption:
-        return
-
-    caption_lower = caption.lower()
-    workout_type = None
-    
-    if '#япобегал' in caption_lower:
-        workout_type = 'run'
-    elif '#япокрутил' in caption_lower:
-        workout_type = 'bike'
-    elif '#япоплавал' in caption_lower:
-        workout_type = 'swim'
-
-    if not workout_type:
-        return
-
-    matches = re.search(r'(\d+[.,]?\d*)\s*(км|km)', caption)
-    if matches:
-        try:
-            distance_str = matches.group(1).replace(',', '.')
-            distance_km = float(distance_str)
-            user_name = user.first_name or user.username or "Аноним"
-            save_workout(user.id, user_name, workout_type, distance_km)
-            update.message.reply_text(f"✅ Записано! {distance_km} км", reply_markup=get_main_keyboard())
-        except ValueError:
-            update.message.reply_text("❌ Не понимаю дистанцию", reply_markup=get_main_keyboard())
-
-def get_top_workouts(days=7):
-    conn = sqlite3.connect('workouts.db')
+# Функция для получения последних пробегов
+def get_recent_runs(user_id, limit=5):
+    conn = sqlite3.connect('running.db')
     cursor = conn.cursor()
-    since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute('SELECT user_name, SUM(distance) FROM workouts WHERE date > ? GROUP BY user_id ORDER BY SUM(distance) DESC LIMIT 10', (since_date,))
-    top_list = cursor.fetchall()
+    
+    cursor.execute('''
+        SELECT distance, date FROM runs 
+        WHERE user_id = ? 
+        ORDER BY date DESC 
+        LIMIT ?
+    ''', (user_id, limit))
+    
+    runs = cursor.fetchall()
     conn.close()
-    return top_list
+    
+    return runs
 
-def top_week(update, context):
-    top_list = get_top_workouts(7)
-    send_top_message(update, top_list, "неделю")
+# Обработчик команды /start
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.first_name
+    
+    welcome_text = f"""
+Привет, {username}! 🏃‍♂️
 
-def top_month(update, context):
-    top_list = get_top_workouts(30)
-    send_top_message(update, top_list, "месяц")
+Я бот для учета пробегов. Просто отправляй мне свои пробеги в формате:
+• 5 км
+• 10.5 км
+• 7,2 км
 
-def send_top_message(update, top_list, period_name):
-    if not top_list:
-        update.message.reply_text(f"🏆 За {period_name} пока нет данных.", reply_markup=get_main_keyboard())
-        return
-    message_text = f"🏆 ТОП-10 за {period_name}:\n\n"
-    for i, (user_name, total_distance) in enumerate(top_list, 1):
-        message_text += f"{i}. {user_name}: {total_distance:.1f} км\n"
-    update.message.reply_text(message_text, reply_markup=get_main_keyboard())
+Команды:
+/start - начать работу
+/week - пробег за неделю
+/stats - последние пробеги
+    """
+    
+    bot.reply_to(message, welcome_text)
+    logger.info(f"User {user_id} started the bot")
 
-def main():
-    updater = Updater(token=BOT_TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
+# Обработчик команды /week
+@bot.message_handler(commands=['week'])
+def show_weekly(message):
+    user_id = message.from_user.id
+    weekly_distance = get_weekly_distance(user_id)
+    
+    if weekly_distance > 0:
+        text = f"🏃‍♂️ Ваш пробег за неделю: {weekly_distance:.1f} км"
+    else:
+        text = "📊 Пока нет пробегов за неделю. Начните бегать!"
+    
+    bot.reply_to(message, text)
+    logger.info(f"Weekly stats for user {user_id}: {weekly_distance}km")
 
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("top_week", top_week))
-    dispatcher.add_handler(CommandHandler("top_month", top_month))
-    dispatcher.add_handler(CommandHandler("help", help_command))
+# Обработчик команды /stats
+@bot.message_handler(commands=['stats'])
+def show_stats(message):
+    user_id = message.from_user.id
+    recent_runs = get_recent_runs(user_id)
+    
+    if recent_runs:
+        text = "📈 Ваши последние пробеги:\n\n"
+        for i, (distance, date) in enumerate(recent_runs, 1):
+            text += f"{i}. {distance} км - {date}\n"
+    else:
+        text = "📊 У вас пока нет записанных пробегов."
+    
+    bot.reply_to(message, text)
+    logger.info(f"Stats shown for user {user_id}")
 
-    dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex('^🏃 Мой пробег$'), my_stats))
-    dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex('^🏆 Топ недели$'), top_week))
-    dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex('^📊 Топ месяца$'), top_month))
-    dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex('^❓ Помощь$'), help_command))
+# Главный обработчик текстовых сообщений
+@bot.message_handler(content_types=['text'])
+def handle_text_messages(message):
+    try:
+        user_id = message.from_user.id
+        username = message.from_user.username or message.from_user.first_name
+        text = message.text.strip()
+        
+        logger.info(f"Received message from {user_id} ({username}): {text}")
+        
+        # Пытаемся найти километраж в сообщении
+        km_match = re.search(r'(\d+[,.]?\d*)\s*км', text, re.IGNORECASE)
+        if km_match:
+            km_str = km_match.group(1).replace(',', '.')
+            km = float(km_str)
+            
+            # Сохраняем пробег в базу данных
+            add_run(user_id, username, km)
+            
+            # Получаем недельный пробег для отчета
+            weekly_distance = get_weekly_distance(user_id)
+            
+            response = f"""
+✅ Пробег {km} км сохранен! 🏃‍♂️
 
-    dispatcher.add_handler(MessageHandler(Filters.photo, handle_photo_with_text))
+📊 Ваш пробег за неделю: {weekly_distance:.1f} км
+            """
+            
+            bot.reply_to(message, response)
+            logger.info(f"Run saved: user_id={user_id}, distance={km}km")
+            
+        else:
+            # Если это не пробег, предлагаем помощь
+            help_text = """
+🤔 Я не нашел пробег в вашем сообщении.
 
-    print("Бот запущен...")
-    updater.start_polling()
-    updater.idle()
+Отправьте пробег в формате:
+• 5 км
+• 10.5 км  
+• 7,2 км
 
-if __name__ == '__main__':
-    main()
+Или используйте команды:
+/week - пробег за неделю
+/stats - последние пробеги
+            """
+            bot.reply_to(message, help_text)
+            
+    except ValueError:
+        bot.reply_to(message, "❌ Неправильный формат числа. Используйте например: 5 км или 10.5 км")
+    except Exception as e:
+        logger.error(f"Error handling message: {e}")
+        bot.reply_to(message, "❌ Произошла ошибка при обработке сообщения")
+
+# Запуск бота
+if __name__ == "__main__":
+    logger.info("Initializing database...")
+    init_db()
+    logger.info("Bot starting...")
+    
+    # Проверяем, используем ли мы вебхук или polling
+    webhook_url = os.getenv('WEBHOOK_URL')
+    
+    if webhook_url:
+        logger.info(f"Using webhook: {webhook_url}")
+        bot.remove_webhook()
+        bot.set_webhook(url=webhook_url)
+        logger.info("Webhook set successfully")
+    else:
+        logger.info("Using polling...")
+        bot.polling(none_stop=True, interval=2, timeout=60)
+        logger.info("Polling started")
