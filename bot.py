@@ -12,7 +12,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Токен бота
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8029857232:AAEi8YfRTWafF2M8jQnOQae1Xg25bdqw6Ds')
 
 # База данных
@@ -52,121 +51,101 @@ def get_main_keyboard():
         [KeyboardButton("📊 Топ месяца"), KeyboardButton("❓ Помощь")]
     ], resize_keyboard=True)
 
-# Команда /start
+# Команды
 def start(update, context):
     update.message.reply_text(
-        "🏃 Добро пожаловать в бегового бота!\n\n"
-        "Используйте кнопки ниже для управления:",
+        "🏃 Беговой бот активирован!\n\n"
+        "Отправьте тренировку в формате: 5 км #япобегал\n"
+        "Используйте кнопки для статистики:",
         reply_markup=get_main_keyboard()
     )
 
-# Статистика пользователя
 def get_user_stats(user_id, days=7):
     conn = sqlite3.connect('workouts.db')
     cursor = conn.cursor()
-    
     since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    
-    cursor.execute('''
-        SELECT 
-            COUNT(*) as workouts_count,
-            SUM(distance) as total_distance,
-            AVG(distance) as avg_distance
-        FROM workouts 
-        WHERE user_id = ? AND date > ?
-    ''', (user_id, since_date))
-    
+    cursor.execute('SELECT COUNT(*), SUM(distance), AVG(distance) FROM workouts WHERE user_id = ? AND date > ?', (user_id, since_date))
     stats = cursor.fetchone()
-    
-    cursor.execute('''
-        SELECT workout_type, SUM(distance) as distance
-        FROM workouts 
-        WHERE user_id = ? AND date > ?
-        GROUP BY workout_type
-    ''', (user_id, since_date))
-    
-    workout_types = cursor.fetchall()
     conn.close()
-    
-    return stats, workout_types
+    return stats
 
-# Обработчик кнопки "Мой пробег"
-def my_stats(update, context):
+# Команда /week
+def week_stats(update, context):
     user = update.message.from_user
-    user_id = user.id
+    stats = get_user_stats(user.id, 7)
     
-    stats_week, workout_types_week = get_user_stats(user_id, days=7)
-    stats_month, workout_types_month = get_user_stats(user_id, days=30)
-    
-    if not stats_week or not stats_week[0]:
-        update.message.reply_text(
-            f"📊 {user.first_name}, у вас пока нет тренировок.\n\n"
-            f"Отправьте фото пробежки с дистанцией и хештегом #япобегал!",
-            reply_markup=get_main_keyboard()
-        )
+    if not stats or not stats[0]:
+        update.message.reply_text("📊 За неделю нет тренировок.")
         return
     
-    workouts_week, total_week, avg_week = stats_week
-    workouts_month, total_month, avg_month = stats_month
+    workouts, total, avg = stats
+    update.message.reply_text(f"📅 За неделю: {workouts} пробежек, {total:.1f} км, в среднем {avg:.1f} км")
+
+# Команда /stats
+def all_stats(update, context):
+    user = update.message.from_user
+    conn = sqlite3.connect('workouts.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT distance, date FROM workouts WHERE user_id = ? ORDER BY date DESC LIMIT 10', (user.id,))
+    workouts = cursor.fetchall()
+    conn.close()
     
-    message = f"🏃 **Статистика {user.first_name}**\n\n"
-    message += f"📅 **За текущую неделю:**\n"
-    message += f"   • Пробежки: {workouts_week}\n"
-    message += f"   • Дистанция: {total_week:.1f} км\n"
-    message += f"   • В среднем: {avg_week:.1f} км/пробег\n\n"
+    if not workouts:
+        update.message.reply_text("📊 Пока нет записанных тренировок.")
+        return
     
-    message += f"📅 **За текущий месяц:**\n"
-    message += f"   • Пробежки: {workouts_month}\n"
-    message += f"   • Дистанция: {total_month:.1f} км\n"
-    message += f"   • В среднем: {avg_month:.1f} км/пробег\n"
+    message = "📋 Последние тренировки:\n"
+    for distance, date in workouts:
+        message += f"• {distance:.1f} км ({date[:10]})\n"
+    
+    update.message.reply_text(message)
+
+# Кнопка "Мой пробег"
+def my_stats(update, context):
+    user = update.message.from_user
+    stats_week = get_user_stats(user.id, 7)
+    stats_month = get_user_stats(user.id, 30)
+    
+    if not stats_week or not stats_week[0]:
+        update.message.reply_text("📊 Пока нет тренировок.", reply_markup=get_main_keyboard())
+        return
+    
+    wk_workouts, wk_total, wk_avg = stats_week
+    mn_workouts, mn_total, mn_avg = stats_month
+    
+    message = f"🏃 Статистика {user.first_name}:\n\n"
+    message += f"📅 Неделя: {wk_workouts} пробежек, {wk_total:.1f} км\n"
+    message += f"📅 Месяц: {mn_workouts} пробежек, {mn_total:.1f} км\n"
     
     update.message.reply_text(message, reply_markup=get_main_keyboard())
 
-# Обработчик кнопки "Помощь"
 def help_command(update, context):
-    help_text = """🤖 **Как пользоваться ботом:**
-
-📸 **Чтобы записать тренировку:**
-Отправьте фото с подписью:
-• 5 км #япобегал - для бега
-• 20 км #япокрутил - для вело
-• 1 км #япоплавал - для плавания
-
-⚡ **Бот учитывает ТОЛЬКО сообщения с хештегами!**
-Сообщения без #япобегал/#япокрутил/#япоплавал игнорируются.
-
-📊 **Кнопки:**
-• 🏃 Мой пробег - ваша статистика
-• 🏆 Топ недели - рейтинг за неделю
-• 📊 Топ месяца - рейтинг за месяц"""
-    
+    help_text = "🤖 Отправьте: 5 км #япобегал\nИспользуйте кнопки для статистики!"
     update.message.reply_text(help_text, reply_markup=get_main_keyboard())
 
-# Обработчик сообщений с фото - ТОЛЬКО с хештегами
-def handle_photo_with_text(update, context):
-    message = update.message
+# Обработчик сообщений с тренировками
+def handle_workout_message(update, context):
+    text = update.message.text
     user = update.message.from_user
-    caption = message.caption
-
-    if not caption:
-        return  # Игнорируем фото без подписи
-
-    caption_lower = caption.lower()
     
-    # Проверяем наличие хештегов
+    if not text:
+        return
+    
+    text_lower = text.lower()
+    
+    # Проверяем хештеги
     workout_type = None
-    if '#япобегал' in caption_lower:
+    if '#япобегал' in text_lower:
         workout_type = 'run'
-    elif '#япокрутил' in caption_lower:
+    elif '#япокрутил' in text_lower:
         workout_type = 'bike'
-    elif '#япоплавал' in caption_lower:
+    elif '#япоплавал' in text_lower:
         workout_type = 'swim'
+    else:
+        return  # Игнорируем если нет хештега
     
-    if not workout_type:
-        return  # Игнорируем сообщения без правильных хештегов
-
     # Ищем дистанцию
-    matches = re.search(r'(\d+[.,]?\d*)\s*(км|km|КМ)', caption, re.IGNORECASE)
+    matches = re.search(r'(\d+[.,]?\d*)\s*(км|km)', text, re.IGNORECASE)
     if matches:
         try:
             distance_str = matches.group(1).replace(',', '.')
@@ -175,30 +154,16 @@ def handle_photo_with_text(update, context):
             user_name = user.first_name or user.username or "Аноним"
             save_workout(user.id, user_name, workout_type, distance_km)
             
-            update.message.reply_text(
-                f"✅ Записано! {distance_km} км",
-                reply_markup=get_main_keyboard()
-            )
+            update.message.reply_text(f"✅ Записано! {distance_km} км", reply_markup=get_main_keyboard())
         except ValueError:
-            # Игнорируем ошибки - не наша проблема
-            return
-    else:
-        # Игнорируем если нет дистанции
-        return
+            pass
 
-# Функции для топа
+# Топы
 def get_top_workouts(days=7):
     conn = sqlite3.connect('workouts.db')
     cursor = conn.cursor()
     since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute('''
-        SELECT user_name, SUM(distance) as total_distance 
-        FROM workouts 
-        WHERE date > ? 
-        GROUP BY user_id 
-        ORDER BY total_distance DESC 
-        LIMIT 10
-    ''', (since_date,))
+    cursor.execute('SELECT user_name, SUM(distance) FROM workouts WHERE date > ? GROUP BY user_id ORDER BY SUM(distance) DESC LIMIT 10', (since_date,))
     top_list = cursor.fetchall()
     conn.close()
     return top_list
@@ -213,37 +178,34 @@ def top_month(update, context):
 
 def send_top_message(update, top_list, period_name):
     if not top_list:
-        update.message.reply_text(
-            f"🏆 За {period_name} пока нет данных о тренировках.",
-            reply_markup=get_main_keyboard()
-        )
+        update.message.reply_text(f"🏆 За {period_name} пока нет данных.", reply_markup=get_main_keyboard())
         return
         
-    message_text = f"🏆 ТОП-10 за {period_name}:\n\n"
-    for i, (user_name, total_distance) in enumerate(top_list, 1):
-        message_text += f"{i}. {user_name}: {total_distance:.1f} км\n"
-        
-    update.message.reply_text(message_text, reply_markup=get_main_keyboard())
+    message = f"🏆 ТОП за {period_name}:\n"
+    for i, (user_name, distance) in enumerate(top_list, 1):
+        message += f"{i}. {user_name}: {distance:.1f} км\n"
+    update.message.reply_text(message, reply_markup=get_main_keyboard())
 
-# Главная функция
 def main():
     updater = Updater(token=BOT_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
 
-    # Обработчики команд
+    # Команды
     dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("week", week_stats))
+    dispatcher.add_handler(CommandHandler("stats", all_stats))
     dispatcher.add_handler(CommandHandler("top_week", top_week))
     dispatcher.add_handler(CommandHandler("top_month", top_month))
     dispatcher.add_handler(CommandHandler("help", help_command))
 
-    # Обработчики кнопок - ПРОСТЫЕ фильтры
+    # Кнопки
     dispatcher.add_handler(MessageHandler(Filters.text("🏃 Мой пробег"), my_stats))
     dispatcher.add_handler(MessageHandler(Filters.text("🏆 Топ недели"), top_week))
     dispatcher.add_handler(MessageHandler(Filters.text("📊 Топ месяца"), top_month))
     dispatcher.add_handler(MessageHandler(Filters.text("❓ Помощь"), help_command))
 
-    # Обработчик фото
-    dispatcher.add_handler(MessageHandler(Filters.photo, handle_photo_with_text))
+    # Обработчик текстовых сообщений с тренировками
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_workout_message))
 
     print("Бот запущен...")
     updater.start_polling()
