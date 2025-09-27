@@ -3,8 +3,8 @@ import sqlite3
 import re
 import os
 from datetime import datetime, timedelta
-from telegram import ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # Настройка логирования
 logging.basicConfig(
@@ -44,31 +44,36 @@ def save_workout(user_id, user_name, workout_type, distance):
     conn.commit()
     conn.close()
 
-# Меню
-def get_main_keyboard():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("🏃 Мой пробег"), KeyboardButton("🏆 Топ недели")],
-        [KeyboardButton("📊 Топ месяца"), KeyboardButton("❓ Помощь")]
-    ], resize_keyboard=True)
-
-# Приватный ответ (только для отправителя)
-def reply_private(update, text, reply_markup=None):
+# Приватный ответ (только для отправителя в ЛС)
+def reply_private(update, text):
     try:
-        update.message.reply_text(text, reply_markup=reply_markup)
+        # Пытаемся отправить в личные сообщения
+        update.message.from_user.send_message(text)
     except Exception as e:
-        # Если не удалось ответить в чате, пробуем в личные сообщения
+        # Если не удалось, отвечаем в чате но удаляем исходное сообщение
         try:
-            update.message.from_user.send_message(text, reply_markup=reply_markup)
+            # Удаляем сообщение пользователя чтобы скрыть команду
+            update.message.delete()
         except:
             pass
+        # Отвечаем временным сообщением которое само удалится
+        msg = update.message.reply_text(text)
+        # В реальном боте здесь был бы таймер на удаление сообщения
 
 # Команды
 def start(update, context):
     reply_private(update,
-        "🏃 Беговой бот активирован!\n\n"
-        "Отправьте тренировку в формате: 5 км #япобегал\n"
-        "Используйте кнопки для статистики:",
-        get_main_keyboard()
+        "🏃 Беговой бот\n\n"
+        "Команды:\n"
+        "/week - статистика за неделю\n" 
+        "/stats - последние тренировки\n"
+        "/top_week - топ за неделю (публичный)\n"
+        "/top_month - топ за месяц (публичный)\n\n"
+        "Чтобы записать тренировку, отправьте:\n"
+        "5 км #япобегал - для бега\n"
+        "20 км #япокрутил - для вело\n"
+        "1 км #япоплавал - для плавания\n\n"
+        "Бот работает автоматически!"
     )
 
 def get_user_stats(user_id, days=7):
@@ -90,7 +95,7 @@ def week_stats(update, context):
         return
     
     workouts, total, avg = stats
-    reply_private(update, f"📅 За неделю: {workouts} пробежек, {total:.1f} км, в среднем {avg:.1f} км")
+    reply_private(update, f"📅 Неделя: {workouts} пробежек, {total:.1f} км, в среднем {avg:.1f} км")
 
 # Команда /stats
 def all_stats(update, context):
@@ -110,29 +115,6 @@ def all_stats(update, context):
         message += f"• {distance:.1f} км ({date[:10]})\n"
     
     reply_private(update, message)
-
-# Кнопка "Мой пробег"
-def my_stats(update, context):
-    user = update.message.from_user
-    stats_week = get_user_stats(user.id, 7)
-    stats_month = get_user_stats(user.id, 30)
-    
-    if not stats_week or not stats_week[0]:
-        reply_private(update, "📊 Пока нет тренировок.", get_main_keyboard())
-        return
-    
-    wk_workouts, wk_total, wk_avg = stats_week
-    mn_workouts, mn_total, mn_avg = stats_month
-    
-    message = f"🏃 Статистика {user.first_name}:\n\n"
-    message += f"📅 Неделя: {wk_workouts} пробежек, {wk_total:.1f} км\n"
-    message += f"📅 Месяц: {mn_workouts} пробежек, {mn_total:.1f} км\n"
-    
-    reply_private(update, message, get_main_keyboard())
-
-def help_command(update, context):
-    help_text = "🤖 Отправьте: 5 км #япобегал\nИспользуйте кнопки для статистики!"
-    reply_private(update, help_text, get_main_keyboard())
 
 # Обработчик сообщений с тренировками
 def handle_workout_message(update, context):
@@ -166,7 +148,7 @@ def handle_workout_message(update, context):
             save_workout(user.id, user_name, workout_type, distance_km)
             
             # Приватный ответ о записи
-            reply_private(update, f"✅ Записано! {distance_km} км", get_main_keyboard())
+            reply_private(update, f"✅ Записано! {distance_km} км")
         except ValueError:
             pass
 
@@ -190,7 +172,7 @@ def top_month(update, context):
 
 def send_top_message(update, top_list, period_name):
     if not top_list:
-        reply_private(update, f"🏆 За {period_name} пока нет данных.", get_main_keyboard())
+        reply_private(update, f"🏆 За {period_name} пока нет данных.")
         return
         
     message = f"🏆 ТОП за {period_name}:\n"
@@ -213,13 +195,7 @@ def main():
     dispatcher.add_handler(CommandHandler("stats", all_stats))
     dispatcher.add_handler(CommandHandler("top_week", top_week))
     dispatcher.add_handler(CommandHandler("top_month", top_month))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-
-    # Кнопки
-    dispatcher.add_handler(MessageHandler(Filters.text("🏃 Мой пробег"), my_stats))
-    dispatcher.add_handler(MessageHandler(Filters.text("🏆 Топ недели"), top_week))
-    dispatcher.add_handler(MessageHandler(Filters.text("📊 Топ месяца"), top_month))
-    dispatcher.add_handler(MessageHandler(Filters.text("❓ Помощь"), help_command))
+    dispatcher.add_handler(CommandHandler("help", start))  # help = start
 
     # Обработчик текстовых сообщений с тренировками
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_workout_message))
