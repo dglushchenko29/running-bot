@@ -8,7 +8,10 @@ from telegram import (
     Update, 
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    BotCommand
+    BotCommand,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    MenuButtonCommands
 )
 from telegram.ext import (
     Application, 
@@ -48,6 +51,10 @@ class RunningBot:
         self.application.add_handler(CommandHandler("top_week", self._top_week))
         self.application.add_handler(CommandHandler("top_month", self._top_month))
         self.application.add_handler(CommandHandler("help", self._help))
+        self.application.add_handler(CommandHandler("add_runner", self._add_runner))
+        
+        # Обработчик callback кнопок
+        self.application.add_handler(CallbackQueryHandler(self._button_handler))
         
         # Обработчик сообщений в группах (для парсинга #япобегал)
         self.application.add_handler(MessageHandler(
@@ -83,6 +90,20 @@ class RunningBot:
             id='monthly_stats'
         )
     
+    async def _setup_menu_buttons(self, application):
+        """Настройка кнопок меню бота"""
+        commands = [
+            BotCommand("start", "Регистрация и начало работы"),
+            BotCommand("stats", "Моя статистика"),
+            BotCommand("top_week", "Топ за неделю"),
+            BotCommand("top_month", "Топ за месяц"),
+            BotCommand("help", "Помощь"),
+            BotCommand("add_runner", "Добавить пробежку")
+        ]
+        
+        await application.bot.set_my_commands(commands)
+        await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    
     async def _start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
         user = update.effective_user
@@ -91,30 +112,136 @@ class RunningBot:
         self.db.add_user(user.id, user.first_name, user.last_name, user.username)
         
         if chat.type == "private":
+            # Создаем клавиатуру для ЛС
+            keyboard = [
+                ["📊 Моя статистика", "🏆 Топ недели"],
+                ["📈 Топ месяца", "❓ Помощь"],
+                ["➕ Добавить пробежку"]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            
             await update.message.reply_text(
                 f"🏃 Привет, {user.first_name}!\n\n"
-                "Я бот для учета пробежек! Вот что я умею:\n\n"
-                "В ЛИЧНЫХ СООБЩЕНИЯХ:\n"
-                "/stats - твоя статистика\n"
-                "/stats @username - статистика другого бегуна\n"
-                "/top_week - топ за неделю\n"
-                "/top_month - топ за месяц\n\n"
-                "В ГРУППОВОМ ЧАТЕ:\n"
-                "Просто отправь сообщение с хештегом:\n"
-                "#япобегал 5.2км\n"
-                "и я автоматически запишу твою пробежку!\n\n"
-                "Каждый понедельник в 10:00 я публикую топ за неделю, "
-                "а 1-го числа каждого месяца - топ за месяц!"
+                "Я бот для учета пробежек в нашем чате! Вот что я умею:\n\n"
+                "📱 В ЛИЧНЫХ СООБЩЕНИЯХ:\n"
+                "• Смотри свою статистику\n"
+                "• Смотри топы за неделю/месяц\n"
+                "• Добавляй пробежки\n\n"
+                "💬 В ГРУППОВОМ ЧАТЕ:\n"
+                "• Нажми кнопку 'Добавить пробежку' в меню\n"
+                "• Или отправь сообщение: #япобегал 5.2км\n"
+                "• Я автоматически запишу твою пробежку!\n\n"
+                "📅 Автоматически:\n"
+                "• Каждый понедельник в 10:00 - топ за неделю\n"
+                "• 1-го числа каждого месяца - топ за месяц",
+                reply_markup=reply_markup
             )
         else:
             await update.message.reply_text(
                 "✅ Бот активирован! Теперь я буду автоматически записывать пробежки "
                 "из сообщений с хештегом #япобегал\n\n"
-                "Пример: #япобегал 5.2км\n\n"
+                "Как добавить пробежку:\n"
+                "1. Нажмите кнопку 'Добавить пробежку' в меню бота\n"
+                "2. Или отправьте сообщение: #япобегал 5.2км\n\n"
                 "Для личной статистики напишите мне в ЛС!"
             )
             # Сохраняем чат для рассылки
             self.db.add_chat(chat.id, chat.title)
+    
+    async def _add_runner(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды add_runner - для кнопки в меню группы"""
+        chat = update.effective_chat
+        
+        if chat.type == "private":
+            await update.message.reply_text(
+                "Чтобы добавить пробежку, просто отправь мне сообщение в формате:\n\n"
+                "#япобегал 5.2км\n\n"
+                "Или используй кнопки ниже 👇"
+            )
+        else:
+            await update.message.reply_text(
+                "🏃 Чтобы добавить пробежку:\n\n"
+                "Просто отправьте в чат сообщение:\n"
+                "#япобегал 5.2км\n\n"
+                "Или напишите боту в личные сообщения для более подробной статистики!"
+            )
+    
+    async def _button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик нажатий на кнопки"""
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        user = query.from_user
+        
+        if data == "my_stats":
+            await self._show_user_stats(query, user)
+        elif data == "top_week":
+            await self._show_top_week(query)
+        elif data == "top_month":
+            await self._show_top_month(query)
+        elif data == "add_run":
+            await self._show_add_run_help(query)
+    
+    async def _show_user_stats(self, query, user):
+        """Показать статистику пользователя"""
+        stats = self.db.get_user_stats(user.id)
+        
+        if stats['total_runs'] == 0:
+            await query.edit_message_text(
+                "📊 У тебя пока нет пробежек.\n\n"
+                "Добавь первую пробежку отправив в группе сообщение:\n"
+                "#япобегал 5.2км\n\n"
+                "Или напиши мне в ЛС то же сообщение!"
+            )
+        else:
+            await query.edit_message_text(
+                f"📊 Твоя статистика:\n\n"
+                f"🏃 Всего пробежек: {stats['total_runs']}\n"
+                f"📏 Общая дистанция: {stats['total_distance']:.1f} км\n"
+                f"📈 Средняя дистанция: {stats['average_distance']:.1f} км\n\n"
+                "Продолжай в том же духе! 💪"
+            )
+    
+    async def _show_top_week(self, query):
+        """Показать топ за неделю"""
+        stats = self.db.get_week_stats()
+        await self._send_top_to_query(query, stats, "неделю")
+    
+    async def _show_top_month(self, query):
+        """Показать топ за месяц"""
+        stats = self.db.get_month_stats()
+        await self._send_top_to_query(query, stats, "месяц")
+    
+    async def _send_top_to_query(self, query, stats, period):
+        """Отправить топ в callback query"""
+        if not stats:
+            await query.edit_message_text(f"📭 За эту {period} пока нет пробежек")
+            return
+        
+        text = f"🏆 ТОП бегунов за {period}:\n\n"
+        
+        for i, runner in enumerate(stats[:10], 1):
+            username = f"@{runner['username']}" if runner['username'] else runner['first_name']
+            text += f"{i}. {username} - {runner['total_distance']:.1f} км ({runner['runs_count']} пробежек)\n"
+        
+        await query.edit_message_text(text)
+    
+    async def _show_add_run_help(self, query):
+        """Показать помощь по добавлению пробежки"""
+        await query.edit_message_text(
+            "➕ Добавить пробежку:\n\n"
+            "В ГРУППЕ:\n"
+            "Отправь сообщение:\n"
+            "#япобегал 5.2км\n\n"
+            "В ЛИЧНЫХ СООБЩЕНИЯХ:\n"
+            "Отправь мне сообщение:\n"
+            "#япобегал 5.2км\n\n"
+            "Формат:\n"
+            "• #япобегал 5 км\n"
+            "• #япобегал 10.5км\n"
+            "• #япобегал 7.2 км"
+        )
     
     async def _stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать статистику"""
@@ -127,28 +254,22 @@ class RunningBot:
             )
             return
         
-        target_user = user
-        if context.args:
-            # Если указан username, ищем этого пользователя
-            username = context.args[0].replace('@', '')
-            # Здесь нужно будет доработать поиск по username
-            # Показываем статистику текущего пользователя
-            pass
-        
-        stats = self.db.get_user_stats(target_user.id)
+        stats = self.db.get_user_stats(user.id)
         
         if stats['total_runs'] == 0:
             await update.message.reply_text(
                 "📊 У тебя пока нет пробежек.\n\n"
                 "Добавь первую пробежку отправив в группе сообщение:\n"
-                "#япобегал 5.2км"
+                "#япобегал 5.2км\n\n"
+                "Или напиши мне в ЛС то же сообщение!"
             )
         else:
             await update.message.reply_text(
-                f"📊 Статистика {target_user.first_name}:\n\n"
+                f"📊 Твоя статистика:\n\n"
                 f"🏃 Всего пробежек: {stats['total_runs']}\n"
                 f"📏 Общая дистанция: {stats['total_distance']:.1f} км\n"
-                f"📈 Средняя дистанция: {stats['average_distance']:.1f} км"
+                f"📈 Средняя дистанция: {stats['average_distance']:.1f} км\n\n"
+                "Продолжай в том же духе! 💪"
             )
     
     async def _top_week(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,7 +306,7 @@ class RunningBot:
         
         text = f"🏆 ТОП бегунов за {period}:\n\n"
         
-        for i, runner in enumerate(stats[:10], 1):  # Топ-10
+        for i, runner in enumerate(stats[:10], 1):
             username = f"@{runner['username']}" if runner['username'] else runner['first_name']
             text += f"{i}. {username} - {runner['total_distance']:.1f} км ({runner['runs_count']} пробежек)\n"
         
@@ -196,16 +317,18 @@ class RunningBot:
         await update.message.reply_text(
             "🏃 Помощь по беговому боту:\n\n"
             "В ГРУППЕ:\n"
-            "• Отправь сообщение: #япобегал 5.2км\n"
-            "• Я автоматически запишу пробежку\n\n"
+            "• Нажми 'Добавить пробежку' в меню бота\n"
+            "• Или отправь: #япобегал 5.2км\n\n"
             "В ЛИЧНЫХ СООБЩЕНИЯХ:\n"
+            "• Используй кнопки меню\n"
+            "• Или команды:\n"
             "/stats - твоя статистика\n"
             "/top_week - топ за неделю\n"
             "/top_month - топ за месяц\n"
             "/help - эта справка\n\n"
-            "Автоматически:\n"
-            "• Каждый понедельник в 10:00 - топ за неделю\n"
-            "• 1-го числа каждого месяца в 10:00 - топ за месяц"
+            "📅 Автоматически:\n"
+            "• Понедельник 10:00 - топ за неделю\n"
+            "• 1 число месяца 10:00 - топ за месяц"
         )
     
     async def _handle_group_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -234,7 +357,8 @@ class RunningBot:
                     text=f"✅ Пробежка записана!\n"
                          f"Дистанция: {distance} км\n"
                          f"Всего пробежек: {stats['total_runs']}\n"
-                         f"Общая дистанция: {stats['total_distance']:.1f} км"
+                         f"Общая дистанция: {stats['total_distance']:.1f} км\n\n"
+                         f"Так держать! 💪"
                 )
             except Exception as e:
                 logger.warning(f"Не удалось отправить подтверждение пользователю {user.id}: {e}")
@@ -243,12 +367,27 @@ class RunningBot:
         """Обработчик сообщений в ЛС"""
         message = update.message
         text = message.text
+        user = message.from_user
         
+        # Обработка текстовых кнопок
+        if text == "📊 Моя статистика":
+            await self._stats(update, context)
+        elif text == "🏆 Топ недели":
+            await self._top_week(update, context)
+        elif text == "📈 Топ месяца":
+            await self._top_month(update, context)
+        elif text == "❓ Помощь":
+            await self._help(update, context)
+        elif text == "➕ Добавить пробежку":
+            await message.reply_text(
+                "Чтобы добавить пробежку, отправь мне сообщение в формате:\n\n"
+                "#япобегал 5.2км\n\n"
+                "Или просто напиши в групповом чате то же сообщение!"
+            )
         # Если сообщение содержит #япобегал, парсим его
-        if text and '#япобегал' in text.lower():
+        elif text and '#япобегал' in text.lower():
             distance = self._parse_distance_from_text(text)
             if distance:
-                user = message.from_user
                 self.db.add_user(user.id, user.first_name, user.last_name, user.username)
                 self.db.add_run(user.id, distance)
                 
@@ -257,7 +396,8 @@ class RunningBot:
                     f"✅ Пробежка записана!\n"
                     f"Дистанция: {distance} км\n"
                     f"Всего пробежек: {stats['total_runs']}\n"
-                    f"Общая дистанция: {stats['total_distance']:.1f} км"
+                    f"Общая дистанция: {stats['total_distance']:.1f} км\n\n"
+                    f"Так держать! 💪"
                 )
             else:
                 await message.reply_text(
@@ -265,6 +405,13 @@ class RunningBot:
                     "Правильный формат: #япобегал 5.2км\n"
                     "Или просто: #япобегал 10 км"
                 )
+        elif text and not text.startswith('/'):
+            # Если обычное сообщение без команды
+            await message.reply_text(
+                "Привет! Используй кнопки ниже для навигации 👇\n\n"
+                "Или отправь мне сообщение с пробежкой:\n"
+                "#япобегал 5.2км"
+            )
     
     async def _handle_bot_added_to_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик добавления бота в группу"""
@@ -279,9 +426,10 @@ class RunningBot:
             await update.message.reply_text(
                 "✅ Бот для учета пробежек активирован!\n\n"
                 "Как использовать:\n"
-                "1. Отправьте сообщение: #япобегал 5.2км\n"
-                "2. Бот автоматически запишет пробежку\n"
-                "3. Для статистики напишите боту в ЛС\n\n"
+                "1. Нажмите 'Добавить пробежку' в меню бота\n"
+                "2. Или отправьте сообщение: #япобегал 5.2км\n"
+                "3. Бот автоматически запишет пробежку\n"
+                "4. Для статистики напишите боту в ЛС\n\n"
                 "Каждый понедельник в 10:00 бот публикует топ за неделю!"
             )
     
@@ -345,6 +493,9 @@ class RunningBot:
     
     def run(self):
         """Запуск бота"""
+        # Настраиваем меню при запуске
+        self.application.post_init = self._setup_menu_buttons
+        
         self.scheduler.start()
         logger.info("Бот запущен...")
         logger.info("Планировщик запущен: понедельник 10:00 (неделя), 1 число 10:00 (месяц)")
