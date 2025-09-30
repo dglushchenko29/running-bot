@@ -1,374 +1,321 @@
-import logging
-import sqlite3
-import re
 import os
-from datetime import datetime, timedelta
-from telegram import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler
+import logging
+from datetime import datetime
+from typing import Optional
+
+from telegram import (
+    Update, 
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
+from telegram.ext import (
+    Application, 
+    CommandHandler, 
+    MessageHandler, 
+    CallbackQueryHandler,
+    ContextTypes, 
+    filters,
+    ConversationHandler
+)
+
+from database import Database
 
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8029857232:AAEi8YfRTWafF2M8jQnOQae1Xg25bdqw6Ds')
+# Состояния для ConversationHandler
+DISTANCE, CONFIRMATION = range(2)
 
-# База данных
-def init_db():
-    conn = sqlite3.connect('running_bot.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            telegram_name TEXT,
-            c95_name TEXT,
-            c95_profile_url TEXT,
-            registered_at TEXT
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS workouts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            workout_type TEXT NOT NULL,
-            distance REAL NOT NULL,
-            date TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def register_user(user_id, telegram_name, c95_name, c95_url):
-    conn = sqlite3.connect('running_bot.db')
-    cursor = conn.cursor()
-    registered_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    cursor.execute('''
-        INSERT OR REPLACE INTO users (user_id, telegram_name, c95_name, c95_profile_url, registered_at)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, telegram_name, c95_name, c95_url, registered_at))
-    
-    conn.commit()
-    conn.close()
-
-def get_user(user_id):
-    conn = sqlite3.connect('running_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-    user = cursor.fetchone()
-    conn.close()
-    return user
-
-def save_workout(user_id, workout_type, distance):
-    conn = sqlite3.connect('running_bot.db')
-    cursor = conn.cursor()
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    cursor.execute('''
-        INSERT INTO workouts (user_id, workout_type, distance, date)
-        VALUES (?, ?, ?, ?)
-    ''', (user_id, workout_type, distance, current_time))
-    
-    conn.commit()
-    conn.close()
-
-# Клавиатура для чата - ОДНА кнопка
-def get_chat_keyboard():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("🏃 Добавить пробежку")]
-    ], resize_keyboard=True, one_time_keyboard=False)
-
-# Клавиатура для ЛС - полное меню
-def get_private_keyboard():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("📊 Моя статистика"), KeyboardButton("🏆 Топ недели")],
-        [KeyboardButton("📈 Топ месяца"), KeyboardButton("🔗 Регистрация")]
-    ], resize_keyboard=True)
-
-# Команда старта
-def start_bot(update, context):
-    user = update.message.from_user
-    chat_type = update.message.chat.type
-    
-    if chat_type == 'private':
-        # В ЛС - показываем полное меню
-        user_data = get_user(user.id)
-        if user_data:
-            message = f"🏃 С возвращением, {user_data[2]}!\nВыберите действие:"
-        else:
-            message = "🏃‍♂️ Добро пожаловать! Для начала зарегистрируйтесь."
+class RunningBot:
+    def __init__(self, token: str, db: Database):
+        self.token = token
+        self.db = db
+        self.application = Application.builder().token(token).build()
         
-        update.message.reply_text(message, reply_markup=get_private_keyboard())
-    else:
-        # В чате - показываем одну кнопку
-        update.message.reply_text(
-            "🏃 Нажмите кнопку ниже чтобы добавить пробежку:",
-            reply_markup=get_chat_keyboard()
+        self._setup_handlers()
+    
+    def _setup_handlers(self):
+        # Обработчики для личных сообщений (группа 1 - высокий приоритет)
+        self.application.add_handler(CommandHandler("start", self._start_private), group=1)
+        self.application.add_handler(CommandHandler("stats", self._show_stats), group=1)
+        self.application.add_handler(CommandHandler("help", self._help), group=1)
+        
+        # ConversationHandler для добавления пробежки (только в ЛС)
+        conv_handler = ConversationHandler(
+            entry_points=[
+                CommandHandler("add", self._add_run_start),
+                MessageHandler(filters.TEXT & filters.Regex(r'#япобегал'), self._add_run_start)
+            ],
+            states={
+                DISTANCE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._receive_distance)
+                ],
+                CONFIRMATION: [
+                    CallbackQueryHandler(self._confirm_run, pattern=r'^confirm_'),
+                    CallbackQueryHandler(self._cancel_run, pattern=r'^cancel_')
+                ]
+            },
+            fallbacks=[CommandHandler("cancel", self._cancel_conversation)],
         )
-
-# Обработчик кнопки "🏃 Добавить пробежку"
-def add_run_button(update, context):
-    user = update.message.from_user
+        self.application.add_handler(conv_handler, group=1)
+        
+        # Обработчик для кнопки в группе (группа 2 - низкий приоритет)
+        self.application.add_handler(CallbackQueryHandler(self._group_button_handler, pattern=r'^add_run$'), group=2)
+        
+        # Обработчик для любых сообщений в группах
+        self.application.add_handler(MessageHandler(filters.ChatType.GROUPS, self._group_message_handler), group=2)
     
-    # Проверяем регистрацию
-    user_data = get_user(user.id)
-    if not user_data:
-        update.message.reply_text(
-            "❌ Сначала зарегистрируйтесь в ЛС у бота:\n\n"
-            "1. Напишите боту в личные сообщения\n" 
-            "2. Используйте команду /start\n"
-            "3. Пройдите регистрацию",
-            reply_markup=get_chat_keyboard()
-        )
-        return
-    
-    # Просим ввести дистанцию
-    update.message.reply_text(
-        f"📝 Введите дистанцию пробежки:\n\n"
-        f"Примеры:\n"
-        f"• 5 км\n" 
-        f"• 10.5 км\n"
-        f"• 7,2 км\n\n"
-        f"Бот автоматически добавит #япобегал",
-        reply_markup=ReplyKeyboardMarkup([
-            [KeyboardButton("Отмена")]
-        ], resize_keyboard=True)
-    )
-    
-    context.user_data['waiting_for_distance'] = True
-
-# Обработчик ввода дистанции
-def handle_distance_input(update, context):
-    text = update.message.text
-    user = update.message.from_user
-    
-    if text.lower() == 'отмена':
-        context.user_data.pop('waiting_for_distance', None)
-        update.message.reply_text("❌ Отменено", reply_markup=get_chat_keyboard())
-        return
-    
-    if context.user_data.get('waiting_for_distance'):
-        # Ищем дистанцию в сообщении
-        matches = re.search(r'(\d+[.,]?\d*)\s*(км|km)?', text, re.IGNORECASE)
-        if matches:
-            try:
-                distance_str = matches.group(1).replace(',', '.')
-                distance_km = float(distance_str)
-                
-                # Сохраняем тренировку
-                save_workout(user.id, 'run', distance_km)
-                
-                # Очищаем состояние
-                context.user_data.pop('waiting_for_distance', None)
-                
-                # Пытаемся отправить подтверждение в ЛС
-                try:
-                    user_data = get_user(user.id)
-                    c95_name = user_data[2] or user.first_name
-                    
-                    user.send_message(
-                        f"✅ Пробежка записана!\n\n"
-                        f"🏃‍♂️ Дистанция: {distance_km} км\n"
-                        f"👤 От имени: {c95_name}\n"
-                        f"📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-                    )
-                except:
-                    pass
-                
-                # В чате - простое подтверждение
-                update.message.reply_text(
-                    f"✅ {distance_km} км записано!",
-                    reply_markup=get_chat_keyboard()
-                )
-                
-            except ValueError:
-                update.message.reply_text(
-                    "❌ Не понимаю дистанцию. Введите например: 5 км",
-                    reply_markup=get_chat_keyboard()
-                )
-        else:
-            update.message.reply_text(
-                "❌ Не вижу дистанцию. Введите например: 5 км",
-                reply_markup=get_chat_keyboard()
+    async def _start_private(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /start в личных сообщениях"""
+        user = update.effective_user
+        chat = update.effective_chat
+        
+        # Работаем только в личных сообщениях
+        if chat.type != "private":
+            await update.message.reply_text(
+                "Пожалуйста, напишите мне в личные сообщения для регистрации и управления пробежками!"
             )
-
-# Регистрация в ЛС
-def start_registration(update, context):
-    user = update.message.from_user
-    
-    message = "🔗 *Регистрация*\n\n"
-    message += "1. Найдите свой профиль на s95.ru\n"
-    message += "2. Скопируйте ссылку вида: https://s95.ru/athletes/XXXXX\n"
-    message += "3. Отправьте мне эту ссылку\n\n"
-    message += "После этого введите ваше имя как на сайте."
-    
-    update.message.reply_text(message, parse_mode='Markdown')
-    context.user_data['registration_step'] = 'waiting_url'
-
-# Обработчик сообщений
-def handle_message(update, context):
-    text = update.message.text
-    user = update.message.from_user
-    chat_type = update.message.chat.type
-    
-    if not text:
-        return
-    
-    # Проверяем текущий шаг регистрации (только в ЛС)
-    if chat_type == 'private':
-        registration_step = context.user_data.get('registration_step')
+            return
         
-        if registration_step == 'waiting_url':
-            if 's95.ru/athletes/' in text:
-                c95_url = text.strip()
-                context.user_data['c95_url'] = c95_url
-                context.user_data['registration_step'] = 'waiting_name'
-                
-                update.message.reply_text("✅ Ссылка принята!\n\n📝 Теперь введите ваше имя и фамилию как на сайте С95:")
-            else:
-                update.message.reply_text("❌ Это не похоже на ссылку С95. Нужна ссылка вида: https://s95.ru/athletes/XXXXX")
-        
-        elif registration_step == 'waiting_name':
-            c95_name = text.strip()
-            c95_url = context.user_data.get('c95_url')
-            
-            if c95_url:
-                register_user(user.id, user.first_name, c95_name, c95_url)
-                
-                # Очищаем контекст
-                context.user_data.clear()
-                
-                message = f"✅ *Регистрация завершена!*\n\n"
-                message += f"👤 *Имя:* {c95_name}\n"
-                message += f"🔗 *Профиль:* {c95_url}\n\n"
-                message += "Теперь вы можете добавлять пробежки через кнопку в чате!"
-                
-                update.message.reply_text(message, parse_mode='Markdown', reply_markup=get_private_keyboard())
-        
+        if not self.db.user_exists(user.id):
+            self.db.add_user(user.id, user.first_name, user.last_name, user.username)
+            await update.message.reply_text(
+                f"🏃 Добро пожаловать, {user.first_name}!\n\n"
+                "Вы успешно зарегистрированы в беговом боте!\n\n"
+                "Доступные команды:\n"
+                "/add - Добавить пробежку\n"
+                "/stats - Посмотреть статистику\n"
+                "/help - Помощь\n\n"
+                "Или просто отправьте сообщение с хештегом #япобегал и дистанцией!"
+            )
         else:
-            # Обычное сообщение в ЛС
-            if text == "📊 Моя статистика":
-                show_my_stats(update, context)
-            elif text == "🏆 Топ недели":
-                show_top_week(update, context)
-            elif text == "📈 Топ месяца":
-                show_top_month(update, context)
-            elif text == "🔗 Регистрация":
-                start_registration(update, context)
+            await update.message.reply_text(
+                f"С возвращением, {user.first_name}!\n\n"
+                "Доступные команды:\n"
+                "/add - Добавить пробежку\n" 
+                "/stats - Посмотреть статистику\n"
+                "/help - Помощь\n\n"
+                "Или просто отправьте сообщение с хештегом #япобегал и дистанцией!"
+            )
     
-    else:
-        # Сообщение в чате
-        if text == "🏃 Добавить пробежку":
-            add_run_button(update, context)
-        else:
-            handle_distance_input(update, context)
-
-# Статистика пользователя
-def show_my_stats(update, context):
-    user = update.message.from_user
-    user_data = get_user(user.id)
-    
-    if not user_data:
-        update.message.reply_text("❌ Сначала зарегистрируйтесь!", reply_markup=get_private_keyboard())
-        return
-    
-    conn = sqlite3.connect('running_bot.db')
-    cursor = conn.cursor()
-    
-    since_date_week = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute('SELECT COUNT(*), SUM(distance) FROM workouts WHERE user_id = ? AND date > ?', (user.id, since_date_week))
-    week_stats = cursor.fetchone()
-    
-    since_date_month = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute('SELECT COUNT(*), SUM(distance) FROM workouts WHERE user_id = ? AND date > ?', (user.id, since_date_month))
-    month_stats = cursor.fetchone()
-    
-    conn.close()
-    
-    c95_name, c95_url = user_data[2], user_data[3]
-    
-    message = f"📊 *Статистика {c95_name}*\n\n"
-    if c95_url:
-        message += f"🔗 *Профиль:* [С95]({c95_url})\n"
-    
-    if week_stats and week_stats[0]:
-        message += f"\n📅 *За неделю:*\n"
-        message += f"• Пробежек: {week_stats[0]}\n"
-        message += f"• Дистанция: {week_stats[1]:.1f} км\n"
-    
-    if month_stats and month_stats[0]:
-        message += f"\n📅 *За месяц:*\n"
-        message += f"• Пробежек: {month_stats[0]}\n"
-        message += f"• Дистанция: {month_stats[1]:.1f} км\n"
-    
-    if not week_stats[0] and not month_stats[0]:
-        message += f"\n📭 Пока нет записанных пробежек.\nИспользуйте кнопку в чате!"
-    
-    update.message.reply_text(message, parse_mode='Markdown', reply_markup=get_private_keyboard())
-
-# Функции для топа
-def get_top_workouts(days=7):
-    conn = sqlite3.connect('running_bot.db')
-    cursor = conn.cursor()
-    since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    
-    cursor.execute('''
-        SELECT u.c95_name, u.c95_profile_url, SUM(w.distance) as total_distance
-        FROM workouts w
-        JOIN users u ON w.user_id = u.user_id
-        WHERE w.date > ?
-        GROUP BY u.user_id
-        ORDER BY total_distance DESC
-        LIMIT 10
-    ''', (since_date,))
-    
-    top_list = cursor.fetchall()
-    conn.close()
-    return top_list
-
-def show_top_week(update, context):
-    top_list = get_top_workouts(7)
-    send_top_message(update, top_list, "неделю")
-
-def show_top_month(update, context):
-    top_list = get_top_workouts(30)
-    send_top_message(update, top_list, "месяц")
-
-def send_top_message(update, top_list, period_name):
-    if not top_list:
-        update.message.reply_text(f"🏆 За {period_name} пока нет данных.", reply_markup=get_private_keyboard())
-        return
+    async def _add_run_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Начало добавления пробежки"""
+        user = update.effective_user
+        chat = update.effective_chat
         
-    message = f"🏆 *ТОП за {period_name}:*\n\n"
+        # Работаем только в личных сообщениях
+        if chat.type != "private":
+            await update.message.reply_text(
+                "Пожалуйста, перейдите в личные сообщения с ботом чтобы добавить пробежку!"
+            )
+            return ConversationHandler.END
+        
+        if not self.db.user_exists(user.id):
+            await update.message.reply_text(
+                "Пожалуйста, сначала зарегистрируйтесь с помощью команды /start"
+            )
+            return ConversationHandler.END
+        
+        await update.message.reply_text(
+            "🏃 Введите дистанцию вашей пробежки:\n\n"
+            "Примеры:\n"
+            "• 5 км\n"
+            "• 10.5 км\n" 
+            "• 7.2 км\n\n"
+            "Или отправьте /cancel для отмены"
+        )
+        
+        return DISTANCE
     
-    for i, (c95_name, c95_url, total_distance) in enumerate(top_list, 1):
-        if c95_url:
-            message += f"{i}. [{c95_name}]({c95_url}): {total_distance:.1f} км\n"
+    async def _receive_distance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка введенной дистанции"""
+        text = update.message.text
+        user = update.effective_user
+        
+        # Парсим дистанцию
+        try:
+            distance = self._parse_distance(text)
+            if distance <= 0:
+                raise ValueError("Дистанция должна быть положительной")
+        except (ValueError, IndexError):
+            await update.message.reply_text(
+                "❌ Неверный формат дистанции. Пожалуйста, введите дистанцию в формате:\n"
+                "• 5 км\n"
+                "• 10.5 км\n"
+                "• 7.2 км\n\n"
+                "Или отправьте /cancel для отмены"
+            )
+            return DISTANCE
+        
+        # Сохраняем дистанцию в контексте
+        context.user_data['distance'] = distance
+        
+        # Создаем клавиатуру для подтверждения
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{distance}"),
+                InlineKeyboardButton("❌ Отменить", callback_data="cancel_run")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"📝 Подтвердите добавление пробежки:\n"
+            f"Дистанция: {distance} км\n\n"
+            "Бот автоматически добавит хештег #modern",
+            reply_markup=reply_markup
+        )
+        
+        return CONFIRMATION
+    
+    async def _confirm_run(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Подтверждение добавления пробежки"""
+        query = update.callback_query
+        await query.answer()
+        
+        user = query.from_user
+        distance = context.user_data.get('distance', 0)
+        
+        # Добавляем пробежку в базу
+        self.db.add_run(user.id, distance)
+        
+        # Получаем общую статистику
+        total_runs = self.db.get_user_stats(user.id)['total_runs']
+        total_distance = self.db.get_user_stats(user.id)['total_distance']
+        
+        await query.edit_message_text(
+            f"✅ Пробежка добавлена!\n"
+            f"Дистанция: {distance} км\n"
+            f"Всего пробежек: {total_runs}\n"
+            f"Общая дистанция: {total_distance:.1f} км\n\n"
+            f"Теперь вы можете поделиться этим в чате: #япобегал {distance}км"
+        )
+        
+        # Очищаем данные
+        context.user_data.clear()
+        return ConversationHandler.END
+    
+    async def _cancel_run(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отмена добавления пробежки"""
+        query = update.callback_query
+        await query.answer()
+        
+        await query.edit_message_text(
+            "❌ Добавление пробежки отменено"
+        )
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+    
+    async def _cancel_conversation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отмена диалога"""
+        await update.message.reply_text(
+            "Добавление пробежки отменено"
+        )
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+    
+    async def _show_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать статистику пользователя"""
+        user = update.effective_user
+        chat = update.effective_chat
+        
+        if chat.type != "private":
+            await update.message.reply_text(
+                "Пожалуйста, перейдите в личные сообщения с ботом чтобы посмотреть статистику!"
+            )
+            return
+        
+        if not self.db.user_exists(user.id):
+            await update.message.reply_text(
+                "Пожалуйста, сначала зарегистрируйтесь с помощью команды /start"
+            )
+            return
+        
+        stats = self.db.get_user_stats(user.id)
+        
+        if stats['total_runs'] == 0:
+            await update.message.reply_text(
+                "📊 У вас пока нет пробежек.\n"
+                "Добавьте первую пробежку с помощью команды /add"
+            )
         else:
-            message += f"{i}. {c95_name}: {total_distance:.1f} км\n"
+            await update.message.reply_text(
+                f"📊 Ваша статистика:\n\n"
+                f"Всего пробежек: {stats['total_runs']}\n"
+                f"Общая дистанция: {stats['total_distance']:.1f} км\n"
+                f"Средняя дистанция: {stats['average_distance']:.1f} км\n"
+                f"Последняя пробежка: {stats['last_run_distance']} км"
+            )
     
-    update.message.reply_text(message, parse_mode='Markdown', reply_markup=get_private_keyboard())
-
-def main():
-    updater = Updater(token=BOT_TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
-
-    # Команды
-    dispatcher.add_handler(CommandHandler("start", start_bot))
+    async def _help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Помощь"""
+        chat = update.effective_chat
+        
+        if chat.type != "private":
+            await update.message.reply_text(
+                "ℹ️ Этот бот помогает отслеживать пробежки.\n\n"
+                "Для использования перейдите в личные сообщения с ботом!"
+            )
+            return
+        
+        await update.message.reply_text(
+            "🏃 Помощь по беговому боту:\n\n"
+            "Доступные команды:\n"
+            "/start - Регистрация и начало работы\n"
+            "/add - Добавить пробежку\n"
+            "/stats - Посмотреть статистику\n"
+            "/help - Эта справка\n\n"
+            "Быстрое добавление:\n"
+            "Отправьте сообщение с хештегом #япобегал и дистанцией\n"
+            "Пример: #япобегал 5.2км\n\n"
+            "В групповых чатах используйте кнопку 'Добавить пробежку' "
+            "для быстрого перехода к боту в ЛС"
+        )
     
-    # Обработчик всех сообщений
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-
-    print("Бот запущен... (умные кнопки)")
-    updater.start_polling()
-    updater.idle()
-
-if __name__ == '__main__':
-    main()
+    async def _group_button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик кнопки в группе"""
+        query = update.callback_query
+        user = query.from_user
+        
+        # Всегда показываем сообщение о переходе в ЛС
+        await query.answer(
+            "Перейдите в личные сообщения с ботом чтобы добавить пробежку!", 
+            show_alert=True
+        )
+    
+    async def _group_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик сообщений в группах"""
+        # Игнорируем сообщения в группах, если они не команды
+        if update.message.text and not update.message.text.startswith('/'):
+            return
+        
+        # Для команд в группах показываем сообщение о переходе в ЛС
+        if update.message.text and update.message.text.startswith('/'):
+            await update.message.reply_text(
+                "ℹ️ Для работы с ботом перейдите в личные сообщения!"
+            )
+    
+    def _parse_distance(self, text: str) -> float:
+        """Парсит дистанцию из текста"""
+        # Убираем лишние пробелы и приводим к нижнему регистру
+        text = text.lower().strip()
+        
+        # Убираем "км", "km" и другие варианты
+        text = text.replace('км', '').replace('km', '').strip()
+        
+        # Заменяем запятые на точки
+        text = text.replace(',', '.')
+        
+        # Парсим число
+        return float(text)
+    
+    def run(self):
+        """Запуск бота"""
+        logger.info("Бот запущен...")
+        self.application.run_polling()
