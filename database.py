@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 class Database:
@@ -34,6 +34,15 @@ class Database:
                 )
             ''')
             
+            # Таблица чатов для рассылки
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS chats (
+                    chat_id INTEGER PRIMARY KEY,
+                    chat_title TEXT,
+                    added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
             conn.commit()
     
     def user_exists(self, user_id: int) -> bool:
@@ -48,7 +57,7 @@ class Database:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT OR REPLACE INTO users (user_id, first_name, last_name, username)
+                INSERT OR IGNORE INTO users (user_id, first_name, last_name, username)
                 VALUES (?, ?, ?, ?)
             ''', (user_id, first_name, last_name, username))
             conn.commit()
@@ -72,8 +81,7 @@ class Database:
                 SELECT 
                     COUNT(*) as total_runs,
                     COALESCE(SUM(distance), 0) as total_distance,
-                    COALESCE(AVG(distance), 0) as average_distance,
-                    COALESCE(MAX(distance), 0) as last_run_distance
+                    COALESCE(AVG(distance), 0) as average_distance
                 FROM runs 
                 WHERE user_id = ?
             ''', (user_id,))
@@ -83,26 +91,80 @@ class Database:
             return {
                 'total_runs': result[0],
                 'total_distance': result[1],
-                'average_distance': result[2],
-                'last_run_distance': result[3]
+                'average_distance': result[2]
             }
     
-    def get_user_runs(self, user_id: int) -> List[Dict]:
-        """Возвращает все пробежки пользователя"""
+    def get_week_stats(self) -> List[Dict]:
+        """Возвращает статистику за неделю"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT distance, run_date 
-                FROM runs 
-                WHERE user_id = ? 
-                ORDER BY run_date DESC
-            ''', (user_id,))
+                SELECT 
+                    u.user_id,
+                    u.first_name,
+                    u.username,
+                    COUNT(r.run_id) as runs_count,
+                    SUM(r.distance) as total_distance
+                FROM users u
+                JOIN runs r ON u.user_id = r.user_id
+                WHERE r.run_date >= datetime('now', '-7 days')
+                GROUP BY u.user_id
+                ORDER BY total_distance DESC
+            ''')
             
-            runs = []
+            stats = []
             for row in cursor.fetchall():
-                runs.append({
-                    'distance': row[0],
-                    'run_date': row[1]
+                stats.append({
+                    'user_id': row[0],
+                    'first_name': row[1],
+                    'username': row[2],
+                    'runs_count': row[3],
+                    'total_distance': row[4]
                 })
+            return stats
+    
+    def get_month_stats(self) -> List[Dict]:
+        """Возвращает статистику за месяц"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT 
+                    u.user_id,
+                    u.first_name,
+                    u.username,
+                    COUNT(r.run_id) as runs_count,
+                    SUM(r.distance) as total_distance
+                FROM users u
+                JOIN runs r ON u.user_id = r.user_id
+                WHERE r.run_date >= datetime('now', '-30 days')
+                GROUP BY u.user_id
+                ORDER BY total_distance DESC
+            ''')
             
-            return runs
+            stats = []
+            for row in cursor.fetchall():
+                stats.append({
+                    'user_id': row[0],
+                    'first_name': row[1],
+                    'username': row[2],
+                    'runs_count': row[3],
+                    'total_distance': row[4]
+                })
+            return stats
+    
+    def add_chat(self, chat_id: int, chat_title: str):
+        """Добавляет чат для рассылки"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO chats (chat_id, chat_title)
+                VALUES (?, ?)
+            ''', (chat_id, chat_title))
+            conn.commit()
+    
+    def get_chats(self) -> List[int]:
+        """Возвращает список чатов для рассылки"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT chat_id FROM chats')
+            return [row[0] for row in cursor.fetchall()]
