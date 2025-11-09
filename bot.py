@@ -76,6 +76,11 @@ class RunningBot:
 
     def __init__(self):
         self.db = Database()
+    
+    # ДОБАВЬ ЭТИ СТРОКИ ДЛЯ ДИАГНОСТИКИ
+        print("🔍 Проверка конфигурации...")
+        Config.validate_token()
+        print("✅ Конфигурация проверена")
         self.application = Application.builder().token(Config.BOT_TOKEN).build()
         self.setup_handlers()
     
@@ -92,7 +97,7 @@ class RunningBot:
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
     
     def is_admin(self, user_id):
-        admin_ids = [612481183]  # Твой ID
+        admin_ids = [862970986]  # Твой ID
         return user_id in admin_ids
     
     async def start(self, update: Update, context: CallbackContext):

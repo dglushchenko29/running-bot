@@ -49,3 +49,4 @@ logs/
 .railway/
 .idea/
 *.db
+.env
